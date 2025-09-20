@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState, useMemo } from 'react';
 import { MapContainer, TileLayer, Marker, Popup, Circle, useMap } from 'react-leaflet';
 import L from 'leaflet';
 
@@ -355,8 +355,39 @@ const getTimeAgo = (dateString) => {
   }
 };
 
+const DEFAULT_PINS_RADIUS = 15000; // 15 km in meters (default per request)
+const MAX_RADIUS_KM = 200; // slider max
+
 const HazardMap = ({ hazardEvents, userReports = [] }) => {
   const mapRef = useRef();
+  const [mapCenter, setMapCenter] = useState([13.0827, 80.2707]);
+  const [pinsRadius, setPinsRadius] = useState(DEFAULT_PINS_RADIUS);
+  const [showRadiusSlider, setShowRadiusSlider] = useState(true);
+
+  // Try to get user's current location and center the 10km default on it
+  useEffect(() => {
+    if (!navigator || !navigator.geolocation) return;
+    let mounted = true;
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        if (!mounted) return;
+        const { latitude, longitude } = pos.coords;
+        setMapCenter([latitude, longitude]);
+        // if map already exists, fit bounds to the new center
+        if (mapRef.current && mapRef.current.fitBounds) {
+          try {
+            const circle = L.circle([latitude, longitude], { radius: pinsRadius });
+            mapRef.current.fitBounds(circle.getBounds(), { padding: [20,20] });
+          } catch (e) { console.warn('Error fitting to geolocation bounds', e); }
+        }
+      },
+      (err) => {
+        console.warn('Geolocation not available or permission denied, falling back to default center', err);
+      },
+      { enableHighAccuracy: false, timeout: 5000, maximumAge: 60 * 1000 }
+    );
+    return () => { mounted = false; };
+  }, []);
 
   // Chennai coordinates - center of our monitoring area
   const chennaiCenter = [13.0827, 80.2707];
@@ -389,53 +420,104 @@ const HazardMap = ({ hazardEvents, userReports = [] }) => {
   // Create unified marker data to eliminate ALL duplicates
   const unifiedMarkers = createUnifiedMarkerData(sampleHazardEvents, sampleUserReports);
   
-  console.log(`Rendering ${unifiedMarkers.length} deduplicated markers from ${sampleHazardEvents.length} hazard events and ${sampleUserReports.length} user reports`);
-  console.log('Unified markers:', unifiedMarkers);
-  console.log('Hazard events:', sampleHazardEvents);
-  console.log('User reports:', sampleUserReports);
+  // When map is created, fit to a 10km radius around center by default
+  const handleMapCreated = (map) => {
+    mapRef.current = map;
+    try {
+      const centerLL = L.latLng(mapCenter[0], mapCenter[1]);
+      const circle = L.circle(centerLL, { radius: pinsRadius });
+      const bounds = circle.getBounds();
+      map.fitBounds(bounds, { padding: [20, 20] });
 
-  return (
-    <div className="map-container">
-      <div className="map-header">
-        <h2>
-          <i className="fas fa-map-marked-alt"></i>
-          Live Hazard Map
-        </h2>
-        <div className="map-stats">
-          <span className="event-count">
-            {unifiedMarkers.length} Unique Locations
-          </span>
-          <div className="legend">
-            <div className="legend-item">
-              <span className="legend-icon" style={{background: '#e74c3c'}}>🚨</span>
-              Emergency
-            </div>
-            <div className="legend-item">
-              <span className="legend-icon" style={{background: '#3498db'}}>💧</span>
-              Flood
-            </div>
-            <div className="legend-item">
-              <span className="legend-icon" style={{background: '#e74c3c'}}>🌊</span>
-              Tsunami
-            </div>
-            <div className="legend-item">
-              <span className="legend-icon" style={{background: '#9b59b6'}}>🌀</span>
-              Cyclone
-            </div>
-            <div className="legend-item">
-              <span className="legend-icon" style={{background: '#f39c12'}}>🏔️</span>
-              Erosion
-            </div>
-            <div className="legend-item">
-              <span className="legend-icon" style={{background: '#27ae60'}}>🏭</span>
-              Pollution
-            </div>
-          </div>
-        </div>
-      </div>
+      // update center when user moves the map
+      map.on('moveend', () => {
+        const c = map.getCenter();
+        setMapCenter([c.lat, c.lng]);
+      });
+    } catch (e) {
+      console.warn('Error fitting to default radius', e);
+    }
+  };
+
+  // Whenever the selected radius or center changes, update the map view to fit the circle
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !map.fitBounds) return;
+    try {
+      const centerLL = L.latLng(mapCenter[0], mapCenter[1]);
+      const circle = L.circle(centerLL, { radius: pinsRadius });
+      map.fitBounds(circle.getBounds(), { padding: [20,20] });
+    } catch (e) {
+      console.warn('Error fitting map to radius bounds', e);
+    }
+  }, [pinsRadius, mapCenter]);
+
+  // Filter markers by distance to current map center (selected pinsRadius)
+  const pinsWithin = useMemo(() => {
+    const centerLL = L.latLng(mapCenter[0], mapCenter[1]);
+    return unifiedMarkers.filter(m => {
+      if (!m.lat || !m.lon) return false;
+      const d = centerLL.distanceTo(L.latLng(m.lat, m.lon));
+      return d <= pinsRadius;
+    });
+  }, [unifiedMarkers, mapCenter, pinsRadius]);
+ 
+   console.log(`Rendering ${unifiedMarkers.length} deduplicated markers from ${sampleHazardEvents.length} hazard events and ${sampleUserReports.length} user reports`);
+   console.log('Unified markers:', unifiedMarkers);
+   console.log('Hazard events:', sampleHazardEvents);
+   console.log('User reports:', sampleUserReports);
+
+   return (
+     <div className="map-container">
+       <div className="map-header">
+         <h2>
+           <i className="fas fa-map-marked-alt"></i>
+           Live Hazard Map
+         </h2>
+         <div className="map-stats">
+           <span className="event-count">
+             {unifiedMarkers.length} Unique Locations
+           </span>
+           <div style={{display:'flex', alignItems:'center', gap:12, marginLeft:12}}>
+             <label style={{fontSize:12}}><input type="checkbox" checked={showRadiusSlider} onChange={() => setShowRadiusSlider(s => !s)} /> Show radius control</label>
+             {showRadiusSlider && (
+               <div style={{display:'flex', alignItems:'center', gap:8}}>
+                 <label style={{fontSize:12}}>Radius: {(pinsRadius/1000).toFixed(0)} km</label>
+                 <input type="range" min={10} max={MAX_RADIUS_KM} value={Math.round(pinsRadius/1000)} onChange={(e) => setPinsRadius(Number(e.target.value) * 1000)} />
+               </div>
+             )}
+           </div>
+           <div className="legend">
+             <div className="legend-item">
+               <span className="legend-icon" style={{background: '#e74c3c'}}>🚨</span>
+               Emergency
+             </div>
+             <div className="legend-item">
+               <span className="legend-icon" style={{background: '#3498db'}}>💧</span>
+               Flood
+             </div>
+             <div className="legend-item">
+               <span className="legend-icon" style={{background: '#e74c3c'}}>🌊</span>
+               Tsunami
+             </div>
+             <div className="legend-item">
+               <span className="legend-icon" style={{background: '#9b59b6'}}>🌀</span>
+               Cyclone
+             </div>
+             <div className="legend-item">
+               <span className="legend-icon" style={{background: '#f39c12'}}>🏔️</span>
+               Erosion
+             </div>
+             <div className="legend-item">
+               <span className="legend-icon" style={{background: '#27ae60'}}>🏭</span>
+               Pollution
+             </div>
+           </div>
+         </div>
+       </div>
 
       <MapContainer
-        ref={mapRef}
+        whenCreated={handleMapCreated}
         center={chennaiCenter}
         zoom={defaultZoom}
         style={{ height: '100%', width: '100%' }}
@@ -453,232 +535,265 @@ const HazardMap = ({ hazardEvents, userReports = [] }) => {
           opacity={0.3}
         />
 
-        {/* Fit bounds to show all markers */}
-        <FitBounds hazardEvents={sampleHazardEvents} userReports={sampleUserReports} />
+        {/* Render unified markers within selected radius - NO DUPLICATES */}
+        {/* Boundary circle showing the selected pinsRadius */}
+        <Circle center={mapCenter} radius={pinsRadius} pathOptions={{ color: '#2c7be5', dashArray: '6,6', weight: 2, fillOpacity: 0 }} />
 
-        {/* Render unified markers - NO DUPLICATES */}
-        {unifiedMarkers.map((marker, index) => {
-          const isHazardEvent = marker.type === 'hazard_event';
-          const data = marker.data;
-          
-          if (isHazardEvent) {
-            // Render hazard event marker
-            const confidenceLevel = getConfidenceLevel(data.confidence);
-            const timeAgo = getTimeAgo(data.created_at);
+        {pinsWithin.map((marker, index) => {
+           const isHazardEvent = marker.type === 'hazard_event';
+           const data = marker.data;
+           
+           if (isHazardEvent) {
+             // Render hazard event marker
+             const confidenceLevel = getConfidenceLevel(data.confidence);
+             const timeAgo = getTimeAgo(data.created_at);
 
-            return (
-              <React.Fragment key={`hazard-${data.id}-${index}`}>
-                {/* Main marker */}
-                <Marker
-                  position={[marker.lat, marker.lon]}
-                  icon={createHazardIcon(data.hazard_type, data.status, data.confidence || 0.5)}
-                >
-                  <Popup className={`hazard-popup ${data.status}`}>
-                    <div className="popup-content">
-                      <div className="popup-header">
-                        <h3>
-                          <span className={`hazard-type ${data.hazard_type}`}>
-                            {data.hazard_type.charAt(0).toUpperCase() + data.hazard_type.slice(1)}
-                          </span>
-                          {data.status === 'emergency' && (
-                            <span className="emergency-badge">
-                              <i className="fas fa-exclamation-triangle"></i>
-                              EMERGENCY
-                            </span>
-                          )}
-                        </h3>
-                        <span className="event-time">{timeAgo}</span>
-                      </div>
+             return (
+               <React.Fragment key={`hazard-${data.id}-${index}`}>
+                 {/* Main marker */}
+                 <Marker
+                   position={[marker.lat, marker.lon]}
+                   icon={createHazardIcon(data.hazard_type, data.status, data.confidence || 0.5)}
+                 >
+                   <Popup className={`hazard-popup ${data.status}`}>
+                     <div className="popup-content">
+                       <div className="popup-header">
+                         <h3>
+                           <span className={`hazard-type ${data.hazard_type}`}>
+                             {data.hazard_type.charAt(0).toUpperCase() + data.hazard_type.slice(1)}
+                           </span>
+                           {data.status === 'emergency' && (
+                             <span className="emergency-badge">
+                               <i className="fas fa-exclamation-triangle"></i>
+                               EMERGENCY
+                             </span>
+                           )}
+                         </h3>
+                         <span className="event-time">{timeAgo}</span>
+                       </div>
 
-                      <div className="popup-details">
+                       <div className="popup-details">
+                         <div className="detail-row">
+                           <span className="detail-label">Confidence Score:</span>
+                           <div className="confidence-display">
+                             <div className={`confidence-bar ${confidenceLevel}`}>
+                               <div className="confidence-fill" style={{width: `${data.confidence * 100}%`}}></div>
+                             </div>
+                             <span className="confidence-text">{(data.confidence * 100).toFixed(1)}%</span>
+                           </div>
+                         </div>
+
+                         <div className="detail-row">
+                           <span className="detail-label">Source Contributions:</span>
+                           <div className="source-breakdown">
+                             <div className="source-item">
+                               <span className="source-icon">👥</span>
+                               <span className="source-name">Citizen Reports</span>
+                               <span className="source-contribution">
+                                 {data.evidence_json?.source_distribution?.citizen || 0} reports
+                               </span>
+                             </div>
+                             <div className="source-item">
+                               <span className="source-icon">🌊</span>
+                               <span className="source-name">INCOIS Data</span>
+                               <span className="source-contribution">
+                                 {data.evidence_json?.source_distribution?.incois || 0} bulletins
+                               </span>
+                             </div>
+                             <div className="source-item">
+                               <span className="source-icon">📱</span>
+                               <span className="source-name">Social Media</span>
+                               <span className="source-contribution">
+                                 {data.evidence_json?.source_distribution?.social || 0} posts
+                               </span>
+                             </div>
+                             <div className="source-item">
+                               <span className="source-icon">📡</span>
+                               <span className="source-name">IoT Sensors</span>
+                               <span className="source-contribution">
+                                 {data.evidence_json?.source_distribution?.iot || 0} sensors
+                               </span>
+                             </div>
+                           </div>
+                         </div>
+                         <div className="detail-row">
+                           <span className="detail-label">Event ID:</span>
+                           <span>#{data.id}</span>
+                         </div>
+                         
+                         <div className="detail-row">
+                           <span className="detail-label">Severity:</span>
+                           <span className="severity-level">
+                             {'⭐'.repeat(data.severity)} ({data.severity}/5)
+                           </span>
+                         </div>
+                         
+                         <div className="detail-row">
+                           <span className="detail-label">Status:</span>
+                           <span className={`status-badge ${data.status}`}>
+                             {data.status.toUpperCase()}
+                           </span>
+                         </div>
+                         
+                         <div className="detail-row">
+                           <span className="detail-label">Location:</span>
+                           <span className="coordinates">
+                             {marker.lat.toFixed(4)}°N, {marker.lon.toFixed(4)}°E
+                           </span>
+                         </div>
+                         {/* Show submitted text and image for hazard events (if present) */}
+                         { (data.description || data.evidence_json?.report_text) && (
+                           <div className="detail-row">
+                             <span className="detail-label">Description:</span>
+                             <span className="report-text">{data.description || data.evidence_json?.report_text}</span>
+                           </div>
+                         ) }
+                         { (data.evidence_json && Array.isArray(data.evidence_json.report_media_urls) && data.evidence_json.report_media_urls.length>0) && (
+                           <div className="detail-row">
+                             <span className="detail-label">Images:</span>
+                             <div className="evidence-images">
+                               {data.evidence_json.report_media_urls.map((u,i)=> (
+                                 <img key={`ev-${i}`} src={u} alt={`evidence-${i}`} />
+                               ))}
+                             </div>
+                           </div>
+                         )}
+                         
+                         <div className="detail-row">
+                           <span className="detail-label">Last Updated:</span>
+                           <span>{formatUTCTimestamp(data.updated_at)}</span>
+                         </div>
+                       </div>
+
+                       <div className="popup-actions">
+                         <button 
+                           className="btn-details"
+                           onClick={() => {
+                             console.log('View details for event', data.id);
+                           }}
+                         >
+                           <i className="fas fa-info-circle"></i>
+                           View Details
+                         </button>
+                       </div>
+                     </div>
+                   </Popup>
+                 </Marker>
+
+                 {/* Uncertainty circle for low confidence events */}
+                 {data.confidence < 0.6 && (
+                   <Circle
+                     center={[marker.lat, marker.lon]}
+                     radius={1000 * (1 - data.confidence)} // Larger circle for lower confidence
+                     pathOptions={{
+                       color: '#ff7f7f',
+                       fillColor: '#ff7f7f',
+                       fillOpacity: 0.1,
+                       weight: 2,
+                       dashArray: '5, 5'
+                     }}
+                   />
+                 )}
+               </React.Fragment>
+             );
+           } else {
+             // Render user report marker
+             return (
+               <Marker
+                 key={`user-report-${data.id}-${index}`}
+                 position={[marker.lat, marker.lon]}
+                 icon={createUserReportIcon(data.isUserSubmission, data.processed)}
+               >
+                 <Popup className={data.isUserSubmission ? "user-report-popup" : "citizen-report-popup"}>
+                   <div className="popup-content">
+                     <div className="popup-header user-report">
+                       <i className={data.isUserSubmission ? "fas fa-user-check" : "fas fa-users"}></i>
+                       <span>{data.isUserSubmission ? "Your Report" : "Citizen Report"}</span>
+                       <div className="user-badge">{data.user_name || "Citizen"}</div>
+                     </div>
+                     <div className="popup-body">
+                       <div className="detail-row">
+                         <strong>Submitted:</strong>
+                         <span>{new Date(data.timestamp).toLocaleString()}</span>
+                       </div>
+                       <div className="detail-row">
+                         <strong>Status:</strong>
+                         <span className={`status-badge ${data.status}`}>
+                           {data.status?.toUpperCase() || 'PROCESSING'}
+                         </span>
+                       </div>
+                       <div className="detail-row">
+                         <strong>Location:</strong>
+                         <span className="coordinates">
+                           {marker.lat.toFixed(4)}°N, {marker.lon.toFixed(4)}°E
+                         </span>
+                       </div>
+                      {/* Show submitted description and image for user reports */}
+                      { (data.text || data.description) && (
                         <div className="detail-row">
-                          <span className="detail-label">Confidence Score:</span>
-                          <div className="confidence-display">
-                            <div className={`confidence-bar ${confidenceLevel}`}>
-                              <div className="confidence-fill" style={{width: `${data.confidence * 100}%`}}></div>
-                            </div>
-                            <span className="confidence-text">{(data.confidence * 100).toFixed(1)}%</span>
+                          <strong>Description:</strong>
+                          <span className="report-text">{data.text || data.description}</span>
+                        </div>
+                      ) }
+
+                      { (data.media_path || (data.media_files && data.media_files.length>0)) && (
+                        <div className="detail-row">
+                          <strong>Image:</strong>
+                          <div className="report-image">
+                            <img src={data.media_path || (data.media_files && data.media_files[0])} alt="Report image" />
                           </div>
                         </div>
+                      ) }
+                       {data.confidence && (
+                         <div className="detail-row">
+                           <strong>ML Confidence:</strong>
+                           <span className="confidence-value">
+                             {(data.confidence * 100).toFixed(1)}%
+                           </span>
+                         </div>
+                       )}
+                       {data.hazard_type && (
+                         <div className="detail-row">
+                           <strong>Detected Type:</strong>
+                           <span className={`hazard-type ${data.hazard_type}`}>
+                             {data.hazard_type.toUpperCase()}
+                           </span>
+                         </div>
+                       )}
+                       <div className="report-note">
+                         <i className="fas fa-info-circle"></i>
+                         {data.isUserSubmission ? 
+                           (data.confidence ? 
+                             'Your report has been processed through our ML pipeline.' :
+                             'Your report is being processed through our ML pipeline and will contribute to hazard detection.'
+                           ) : 
+                           (data.confidence ?
+                             'This citizen report has been processed through our ML pipeline.' :
+                             'This citizen report is being processed through our ML pipeline.'
+                           )
+                         }
+                       </div>
+                     </div>
+                   </div>
+                 </Popup>
+               </Marker>
+             );
+           }
+         })}
+       </MapContainer>
 
-                        <div className="detail-row">
-                          <span className="detail-label">Source Contributions:</span>
-                          <div className="source-breakdown">
-                            <div className="source-item">
-                              <span className="source-icon">👥</span>
-                              <span className="source-name">Citizen Reports</span>
-                              <span className="source-contribution">
-                                {data.evidence_json?.source_distribution?.citizen || 0} reports
-                              </span>
-                            </div>
-                            <div className="source-item">
-                              <span className="source-icon">🌊</span>
-                              <span className="source-name">INCOIS Data</span>
-                              <span className="source-contribution">
-                                {data.evidence_json?.source_distribution?.incois || 0} bulletins
-                              </span>
-                            </div>
-                            <div className="source-item">
-                              <span className="source-icon">📱</span>
-                              <span className="source-name">Social Media</span>
-                              <span className="source-contribution">
-                                {data.evidence_json?.source_distribution?.social || 0} posts
-                              </span>
-                            </div>
-                            <div className="source-item">
-                              <span className="source-icon">📡</span>
-                              <span className="source-name">IoT Sensors</span>
-                              <span className="source-contribution">
-                                {data.evidence_json?.source_distribution?.iot || 0} sensors
-                              </span>
-                            </div>
-                          </div>
-                        </div>
-                        <div className="detail-row">
-                          <span className="detail-label">Event ID:</span>
-                          <span>#{data.id}</span>
-                        </div>
-                        
-                        <div className="detail-row">
-                          <span className="detail-label">Severity:</span>
-                          <span className="severity-level">
-                            {'⭐'.repeat(data.severity)} ({data.severity}/5)
-                          </span>
-                        </div>
-                        
-                        <div className="detail-row">
-                          <span className="detail-label">Status:</span>
-                          <span className={`status-badge ${data.status}`}>
-                            {data.status.toUpperCase()}
-                          </span>
-                        </div>
-                        
-                        <div className="detail-row">
-                          <span className="detail-label">Location:</span>
-                          <span className="coordinates">
-                            {marker.lat.toFixed(4)}°N, {marker.lon.toFixed(4)}°E
-                          </span>
-                        </div>
-                        
-                        <div className="detail-row">
-                          <span className="detail-label">Last Updated:</span>
-                          <span>{formatUTCTimestamp(data.updated_at)}</span>
-                        </div>
-                      </div>
+       {/* Map overlay info */}
+       <div className="map-overlay">
+         <div className="live-indicator">
+           <div className="pulse-dot"></div>
+           LIVE
+         </div>
+         <div className="last-update">
+           Last updated: {new Date().toLocaleTimeString()}
+         </div>
+       </div>
 
-                      <div className="popup-actions">
-                        <button 
-                          className="btn-details"
-                          onClick={() => {
-                            console.log('View details for event', data.id);
-                          }}
-                        >
-                          <i className="fas fa-info-circle"></i>
-                          View Details
-                        </button>
-                      </div>
-                    </div>
-                  </Popup>
-                </Marker>
-
-                {/* Uncertainty circle for low confidence events */}
-                {data.confidence < 0.6 && (
-                  <Circle
-                    center={[marker.lat, marker.lon]}
-                    radius={1000 * (1 - data.confidence)} // Larger circle for lower confidence
-                    pathOptions={{
-                      color: '#ff7f7f',
-                      fillColor: '#ff7f7f',
-                      fillOpacity: 0.1,
-                      weight: 2,
-                      dashArray: '5, 5'
-                    }}
-                  />
-                )}
-              </React.Fragment>
-            );
-          } else {
-            // Render user report marker
-            return (
-              <Marker
-                key={`user-report-${data.id}-${index}`}
-                position={[marker.lat, marker.lon]}
-                icon={createUserReportIcon(data.isUserSubmission, data.processed)}
-              >
-                <Popup className={data.isUserSubmission ? "user-report-popup" : "citizen-report-popup"}>
-                  <div className="popup-content">
-                    <div className="popup-header user-report">
-                      <i className={data.isUserSubmission ? "fas fa-user-check" : "fas fa-users"}></i>
-                      <span>{data.isUserSubmission ? "Your Report" : "Citizen Report"}</span>
-                      <div className="user-badge">{data.user_name || "Citizen"}</div>
-                    </div>
-                    <div className="popup-body">
-                      <div className="detail-row">
-                        <strong>Submitted:</strong>
-                        <span>{new Date(data.timestamp).toLocaleString()}</span>
-                      </div>
-                      <div className="detail-row">
-                        <strong>Status:</strong>
-                        <span className={`status-badge ${data.status}`}>
-                          {data.status?.toUpperCase() || 'PROCESSING'}
-                        </span>
-                      </div>
-                      <div className="detail-row">
-                        <strong>Location:</strong>
-                        <span className="coordinates">
-                          {marker.lat.toFixed(4)}°N, {marker.lon.toFixed(4)}°E
-                        </span>
-                      </div>
-                      {data.confidence && (
-                        <div className="detail-row">
-                          <strong>ML Confidence:</strong>
-                          <span className="confidence-value">
-                            {(data.confidence * 100).toFixed(1)}%
-                          </span>
-                        </div>
-                      )}
-                      {data.hazard_type && (
-                        <div className="detail-row">
-                          <strong>Detected Type:</strong>
-                          <span className={`hazard-type ${data.hazard_type}`}>
-                            {data.hazard_type.toUpperCase()}
-                          </span>
-                        </div>
-                      )}
-                      <div className="report-note">
-                        <i className="fas fa-info-circle"></i>
-                        {data.isUserSubmission ? 
-                          (data.confidence ? 
-                            'Your report has been processed through our ML pipeline.' :
-                            'Your report is being processed through our ML pipeline and will contribute to hazard detection.'
-                          ) : 
-                          (data.confidence ?
-                            'This citizen report has been processed through our ML pipeline.' :
-                            'This citizen report is being processed through our ML pipeline.'
-                          )
-                        }
-                      </div>
-                    </div>
-                  </div>
-                </Popup>
-              </Marker>
-            );
-          }
-        })}
-      </MapContainer>
-
-      {/* Map overlay info */}
-      <div className="map-overlay">
-        <div className="live-indicator">
-          <div className="pulse-dot"></div>
-          LIVE
-        </div>
-        <div className="last-update">
-          Last updated: {new Date().toLocaleTimeString()}
-        </div>
-      </div>
-
-      <style jsx>{`
+       <style jsx>{`
         .map-container {
           position: relative;
           height: 600px;
@@ -693,6 +808,9 @@ const HazardMap = ({ hazardEvents, userReports = [] }) => {
           padding: 1rem 1.5rem;
           background: #f8f9fa;
           border-bottom: 1px solid #e9ecef;
+          position: relative;
+          z-index: 1200; /* keep header above map interactions */
+          pointer-events: auto;
         }
 
         .map-header h2 {
@@ -1006,13 +1124,42 @@ const HazardMap = ({ hazardEvents, userReports = [] }) => {
           gap: 0.5rem;
         }
 
+        .report-image img {
+          max-width: 220px;
+          max-height: 160px;
+          border-radius: 8px;
+          box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+          display: block;
+        }
+
+        .evidence-images {
+          display: flex;
+          gap: 8px;
+          align-items: center;
+          flex-wrap: wrap;
+        }
+
+        .evidence-images img {
+          width: 100px;
+          height: 70px;
+          object-fit: cover;
+          border-radius: 6px;
+          box-shadow: 0 1px 6px rgba(0,0,0,0.12);
+        }
+
+        .report-text {
+          display: block;
+          max-width: 320px;
+          color: #2c3e50;
+        }
+
         .report-note i {
           margin-top: 0.1rem;
           opacity: 0.8;
         }
       `}</style>
-    </div>
-  );
-};
-
-export default HazardMap;
+     </div>
+   );
+ };
+ 
+ export default HazardMap;

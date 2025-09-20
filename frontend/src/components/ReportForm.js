@@ -194,12 +194,22 @@ const ReportForm = ({ onReportSubmitted }) => {
 
       if (response.ok) {
         const result = await response.json();
-        
+
+        // Build object to send to parent that includes the submitted lat/lon and other form values
+        const resultWithSession = {
+          ...submitData,
+          id: result.id,
+          isUserSubmission: true,
+          user_session_id: userSessionId
+        };
+
         // Store this report ID as user's own submission
         const userReports = JSON.parse(sessionStorage.getItem('userReportIds') || '[]');
-        userReports.push(result.id);
-        sessionStorage.setItem('userReportIds', JSON.stringify(userReports));
-        
+        if (!userReports.includes(result.id)) {
+          userReports.push(result.id);
+          sessionStorage.setItem('userReportIds', JSON.stringify(userReports));
+        }
+
         // Clear form
         setFormData({
           text: '',
@@ -208,22 +218,17 @@ const ReportForm = ({ onReportSubmitted }) => {
           media_path: null
         });
         setImagePreview(null);
-        
-        // Notify parent component with session info
-        const resultWithSession = {
-          ...result,
-          isUserSubmission: true,
-          user_session_id: userSessionId
-        };
+
+        // Notify parent component with full report data (includes lat/lon)
         onReportSubmitted(resultWithSession);
-        
+
         // 🚀 REAL-TIME UPDATE: Broadcast to admin dashboard
-        // Send custom event to trigger admin dashboard refresh
+        // Send custom event to trigger admin dashboard refresh (use submitData for accurate coords)
         window.dispatchEvent(new CustomEvent('newReportSubmitted', {
           detail: {
             reportId: result.id,
             timestamp: new Date().toISOString(),
-            location: `${formData.lat}, ${formData.lon}`,
+            location: `${submitData.lat}, ${submitData.lon}`,
             type: 'citizen_report'
           }
         }));
