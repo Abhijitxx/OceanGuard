@@ -32,6 +32,7 @@ CREATE TABLE public.raw_reports (
     lon REAL NOT NULL,
     media_path TEXT,
     has_media BOOLEAN DEFAULT false,
+    social_id TEXT,
     media_verified BOOLEAN DEFAULT false,
     media_confidence REAL,
     processed BOOLEAN DEFAULT false,

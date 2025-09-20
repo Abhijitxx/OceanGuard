@@ -11,53 +11,76 @@ const DetailedHazardView = ({ hazard, onClose, onValidationAction, onRefresh }) 
   const fetchHazardDetails = useCallback(async () => {
     setIsLoading(true);
     try {
-      // Fetch real reports for this hazard
-      const reportsResponse = await fetch(`/api/raw-reports?limit=100`);
-      if (reportsResponse.ok) {
-        const allReports = await reportsResponse.json();
-        
-        // Filter reports related to this hazard (improved matching)
-        const relatedReports = allReports.filter(report => 
-          report.nlp_type === hazard.hazard_type && 
-          Math.abs(new Date(report.ts) - new Date(hazard.created_at)) < 86400000 && // within 24 hours (was 1 hour)
-          Math.abs(report.lat - hazard.centroid_lat) < 0.5 && // within ~50km (was ~1km)
-          Math.abs(report.lon - hazard.centroid_lon) < 0.5
-        );
-
-        // Transform real reports for display
-        const transformedReports = relatedReports.map((report, index) => ({
+      // Prefer backend-provided related reports when available
+      if (hazard && hazard.related_reports && Array.isArray(hazard.related_reports) && hazard.related_reports.length > 0) {
+        const transformedReports = hazard.related_reports.map((report) => ({
           id: report.id,
-          type: getReportType(report.source),
-          source: report.source,
-          reporter: `user${report.id}@system.local`,
-          timestamp: report.ts,
-          confidence: report.nlp_conf || 0,
+          type: getReportType(report.source || report.type),
+          source: report.source || report.type,
+          reporter: report.user_name || report.reporter || `user${report.id}@system.local`,
+          timestamp: report.timestamp || report.created_at || report.ts,
+          confidence: report.nlp_conf || report.confidence || 0,
           credibility: report.credibility || 0,
-          description: report.text,
+          description: report.text || report.description || report.message || '',
           location: {
             lat: report.lat,
             lon: report.lon
           },
-          processed: report.processed
+          processed: report.processed,
+          image_url: report.image_url || report.media_path || report.media_url || null,
+          content: report.content,
+          engagement: report.engagement
         }));
 
         setReports(transformedReports);
-
-        // Calculate progressive confidence analysis
-        const analysis = calculateProgressiveAnalysis(transformedReports, hazard);
-        setProgressiveAnalysis(analysis);
-
+        setProgressiveAnalysis(calculateProgressiveAnalysis(transformedReports, hazard));
       } else {
-        // Fallback to mock data
-        setReports(generateMockReports(hazard));
-        setProgressiveAnalysis(generateMockAnalysis(hazard));
+        // Fallback: fetch recent raw reports and filter by proximity/time/type
+        const reportsResponse = await fetch(`/api/raw-reports?limit=100`);
+        if (reportsResponse.ok) {
+          const allReports = await reportsResponse.json();
+
+          const relatedReports = allReports.filter(report => {
+            try {
+              return (
+                report.nlp_type === hazard.hazard_type &&
+                Math.abs(new Date(report.ts) - new Date(hazard.created_at)) < 86400000 &&
+                Math.abs(report.lat - hazard.centroid_lat) < 0.5 &&
+                Math.abs(report.lon - hazard.centroid_lon) < 0.5
+              );
+            } catch (e) {
+              return false;
+            }
+          });
+
+          const transformedReports = relatedReports.map((report) => ({
+            id: report.id,
+            type: getReportType(report.source),
+            source: report.source,
+            reporter: `user${report.id}@system.local`,
+            timestamp: report.ts,
+            confidence: report.nlp_conf || 0,
+            credibility: report.credibility || 0,
+            description: report.text,
+            location: { lat: report.lat, lon: report.lon },
+            processed: report.processed,
+            image_url: report.image_url || report.media_path || null
+          }));
+
+          setReports(transformedReports);
+          setProgressiveAnalysis(calculateProgressiveAnalysis(transformedReports, hazard));
+        } else {
+          setReports(generateMockReports(hazard));
+          setProgressiveAnalysis(generateMockAnalysis(hazard));
+        }
       }
     } catch (error) {
       console.error('Error fetching hazard details:', error);
       setReports(generateMockReports(hazard));
       setProgressiveAnalysis(generateMockAnalysis(hazard));
+    } finally {
+      setIsLoading(false);
     }
-    setIsLoading(false);
   }, [hazard]);
 
   // Transform source to report type
@@ -374,6 +397,20 @@ const DetailedHazardView = ({ hazard, onClose, onValidationAction, onRefresh }) 
                     </div>
                   </div>
                 </div>
+
+                {hazard.related_news && hazard.related_news.length > 0 && (
+                  <div className="overview-card">
+                    <h3><i className="fas fa-newspaper"></i> Related News</h3>
+                    <ul className="news-list">
+                      {hazard.related_news.slice(0,5).map((n, i) => (
+                        <li key={i} className="news-item">
+                          <a href={n.url || '#'} target="_blank" rel="noreferrer">{n.title || n.headline || n.summary || 'News item'}</a>
+                          <div className="news-meta">{n.source || n.user_name || 'Local News'} • {formatTimeAgo(n.published_at || n.published || n.created_at || new Date().toISOString())}</div>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
               </div>
             </div>
           )}

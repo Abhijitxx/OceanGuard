@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import HazardMap from './HazardMap';
+import DetailedHazardView from './DetailedHazardView';
 import ReportForm from './ReportForm';
 import { toast } from 'react-toastify';
 import './CitizenDashboard.css';
@@ -13,6 +14,8 @@ const CitizenDashboard = () => {
   const [reports, setReports] = useState([]);
   const [notifications, setNotifications] = useState([]);
   const [incoisBulletins, setIncoisBulletins] = useState([]);
+  const [selectedHazard, setSelectedHazard] = useState(null);
+  const [selectedHazardLoading, setSelectedHazardLoading] = useState(false);
   const [isConnected, setIsConnected] = useState(false);
   const eventSourceRef = useRef(null);
   const pollIntervalRef = useRef(null);
@@ -354,6 +357,30 @@ const CitizenDashboard = () => {
     toast.success('Report submitted successfully! 🌊 Your report is now visible in the list.');
   };
 
+  // Handler invoked when user clicks 'View Details' on a hazard marker
+  const handleViewHazardDetails = async (hazardId) => {
+    try {
+      setSelectedHazardLoading(true);
+      const res = await fetch(`/api/hazards/${hazardId}/details`);
+      if (res.ok) {
+        const data = await res.json();
+        // Include related news if provided by backend
+        setSelectedHazard({ 
+          ...data.hazard, 
+          related_reports: data.related_reports || [], 
+          related_bulletins: data.related_bulletins || [],
+          related_news: data.related_news || []
+        });
+      } else {
+        console.error('Failed to fetch hazard details', res.statusText);
+      }
+    } catch (error) {
+      console.error('Error fetching hazard details:', error);
+    } finally {
+      setSelectedHazardLoading(false);
+    }
+  };
+
   const getSeverityColor = (severity) => {
     switch (severity) {
       case 'low': return '#28a745';
@@ -472,6 +499,7 @@ const CitizenDashboard = () => {
         <HazardMap 
           hazardEvents={hazardEvents} 
           userReports={userReports}
+          onViewDetails={handleViewHazardDetails}
         />
       </div>
     </div>
@@ -528,6 +556,24 @@ const CitizenDashboard = () => {
       </div>
     </div>
   );
+
+  // Render DetailedHazardView modal when user selects a hazard
+  const renderSelectedHazardModal = () => {
+    if (!selectedHazard) return null;
+    return (
+      <DetailedHazardView
+        hazard={selectedHazard}
+        onClose={() => setSelectedHazard(null)}
+        onValidationAction={async (hazardId, action, notes) => {
+          // For citizens, validation actions may be restricted. We provide a passthrough stub.
+          try {
+            await fetch(`/api/hazards/${hazardId}/validate`, { method: 'POST', body: JSON.stringify({ action, notes }), headers: { 'Content-Type': 'application/json' } });
+          } catch (e) { console.error('Validation action failed', e); }
+        }}
+        onRefresh={() => { fetchHazardEvents(); fetchAllReports(); }}
+      />
+    );
+  };
 
   return (
     <div className="citizen-dashboard">

@@ -39,6 +39,7 @@ class RawReport(Base):
     lon = Column(Float, nullable=False)
     media_path = Column(String, nullable=True)
     has_media = Column(Boolean, default=False)
+    social_id = Column(String, nullable=True)
     media_verified = Column(Boolean, default=False)
     media_confidence = Column(Float, nullable=True)
     processed = Column(Boolean, default=False)

@@ -62,11 +62,11 @@ class ProcessingPipeline:
                 }
             
             # Step 2: Credibility Scoring
-            print(f"🔍 Step 2: Credibility Scoring for report {report_id}, timestamp: {report.ts}")
+            print(f"🔍 Step 2: Credibility Scoring for report {report_id}, timestamp: {report.timestamp}")
             
             # Ensure timestamp is timezone-aware for credibility calculation
             from datetime import timezone
-            timestamp = report.ts
+            timestamp = report.timestamp
             if timestamp and timestamp.tzinfo is None:
                 timestamp = timestamp.replace(tzinfo=timezone.utc)
             
@@ -92,7 +92,7 @@ class ProcessingPipeline:
                 'text': report.text,
                 'lat': report.lat,
                 'lon': report.lon,
-                'timestamp': report.ts,
+                'timestamp': report.timestamp,
                 'source': report.source,
                 'nlp_conf': report.nlp_conf,
                 'credibility': report.credibility
@@ -144,7 +144,7 @@ class ProcessingPipeline:
                 'text': r.text,
                 'lat': r.lat,
                 'lon': r.lon,
-                'timestamp': r.ts,
+                'timestamp': r.timestamp,
                 'source': r.source,
                 'nlp_conf': r.nlp_conf or 0.5,
                 'credibility': r.credibility or 0.5,
@@ -195,7 +195,7 @@ class ProcessingPipeline:
                     'text': r.text,
                     'lat': r.lat,
                     'lon': r.lon,
-                    'timestamp': r.ts,
+                    'timestamp': r.timestamp,
                     'source': r.source,
                     'nlp_type': r.nlp_type,
                     'nlp_conf': r.nlp_conf or 0.5,
@@ -215,10 +215,12 @@ class ProcessingPipeline:
             fusion_result = fusion_engine.fuse_reports(reports_data, group_stats)
             
             # Check if hazard event already exists for this group
+            # Search for existing event whose evidence_json.report_ids contains this group_id
+            # Use a single JSON containment check with a proper dict to let SQLAlchemy/psycopg
+            # pass a JSONB parameter rather than concatenated strings which caused invalid
+            # text representation errors.
             existing_event = db.query(HazardEvent).filter(
-                HazardEvent.evidence_json.contains(f'"report_ids": [')
-            ).filter(
-                HazardEvent.evidence_json.contains(str(group_id))
+                HazardEvent.evidence_json.contains({"report_ids": [group_id]})
             ).first()
             
             if existing_event:

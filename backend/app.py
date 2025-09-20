@@ -30,6 +30,7 @@ supabase = get_supabase()
 
 # Import our ML pipeline
 from services.ingest import ProcessingPipeline
+from sqlalchemy.orm import Session as DBSession
 
 # Timezone utility functions
 def get_current_timestamp():
@@ -393,6 +394,109 @@ async def get_hazards(limit: int = 50):
         print(f"Error fetching hazards: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to fetch hazards: {str(e)}")
 
+
+@app.get("/api/hazards/{hazard_id}/details")
+async def get_hazard_details(hazard_id: str):
+    """Return hazard event plus related citizen reports and bulletins"""
+    try:
+        supabase = get_supabase()
+
+        # Fetch hazard event
+        res = supabase.table('hazard_events').select('*').eq('id', hazard_id).execute()
+        if not res.data:
+            raise HTTPException(status_code=404, detail='Hazard event not found')
+        hazard = res.data[0]
+
+        # Try to extract report_ids from evidence_json if present
+        report_ids = []
+        try:
+            evidence = hazard.get('evidence_json') or {}
+            report_ids = evidence.get('report_ids', []) if isinstance(evidence, dict) else []
+        except Exception:
+            report_ids = []
+
+        # Fetch related raw reports by IDs (if any) and also fetch recent nearby reports as fallback
+        related_reports = []
+        if report_ids:
+            rres = supabase.table('raw_reports').select('*').in_('id', report_ids).execute()
+            related_reports = rres.data or []
+
+        if not related_reports:
+            # fallback: fetch recent reports within a small bbox around centroid
+            lat = hazard.get('centroid_lat')
+            lon = hazard.get('centroid_lon')
+            if lat is not None and lon is not None:
+                # simple bounding box +/- ~0.02 degrees (~2km)
+                rres = supabase.table('raw_reports').select('*').gte('lat', lat - 0.02).lte('lat', lat + 0.02).gte('lon', lon - 0.02).lte('lon', lon + 0.02).limit(50).execute()
+                related_reports = rres.data or []
+
+        # Ensure report media URLs are accessible: try signed URL then public URL construction
+        bucket_name = os.getenv('SUPABASE_MEDIA_BUCKET', 'hazard-media')
+        for rep in related_reports:
+            try:
+                media_path = rep.get('media_path')
+                if media_path:
+                    # If media_path already looks like a full URL, keep it
+                    if isinstance(media_path, str) and (media_path.startswith('http://') or media_path.startswith('https://')):
+                        rep['image_url'] = media_path
+                    else:
+                        # Try to create a signed URL (valid for a short time)
+                        try:
+                            # storage client create_signed_url exists in some supabase client versions
+                            signed = supabase.storage.from_(bucket_name).create_signed_url(media_path, 60)
+                            # Normalize response shapes
+                            if isinstance(signed, dict):
+                                rep['image_url'] = signed.get('signedURL') or signed.get('signed_url') or signed.get('signedUrl')
+                            else:
+                                rep['image_url'] = getattr(signed, 'signed_url', None) or getattr(signed, 'signedURL', None)
+                        except Exception:
+                            # Fallback to public URL construction
+                            supabase_url = os.getenv('SUPABASE_URL', '').rstrip('/')
+                            if supabase_url:
+                                rep['image_url'] = f"{supabase_url}/storage/v1/object/public/{bucket_name}/{media_path}"
+                            else:
+                                rep['image_url'] = media_path
+            except Exception:
+                # Non-fatal: leave media_path as-is
+                rep['image_url'] = rep.get('media_path')
+
+        # Fetch recent bulletins that mention same hazard_type or are within time window
+        related_bulletins = []
+        try:
+            bres = supabase.table('raw_bulletins').select('*').eq('hazard_type', hazard.get('hazard_type')).order('issued_at', desc=True).limit(20).execute()
+            related_bulletins = bres.data or []
+        except Exception:
+            related_bulletins = []
+
+        # Try to include local news items if a 'news' table exists (seeded by init scripts)
+        related_news = []
+        try:
+            # Attempt to query a 'news' table if present. We'll filter by proximity if centroid exists.
+            if 'centroid_lat' in hazard and hazard.get('centroid_lat') is not None:
+                lat = hazard.get('centroid_lat')
+                lon = hazard.get('centroid_lon')
+                # Very simple proximity filter using bbox
+                nres = supabase.table('news').select('*').gte('lat', lat - 0.05).lte('lat', lat + 0.05).gte('lon', lon - 0.05).lte('lon', lon + 0.05).order('published_at', desc=True).limit(10).execute()
+            else:
+                nres = supabase.table('news').select('*').order('published_at', desc=True).limit(10).execute()
+
+            related_news = nres.data or []
+        except Exception:
+            # Table may not exist or other errors; ignore gracefully
+            related_news = []
+
+        return {
+            'hazard': hazard,
+            'related_reports': related_reports,
+            'related_bulletins': related_bulletins,
+            'related_news': related_news
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error fetching hazard details for {hazard_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.get("/api/raw-reports")
 async def get_raw_reports(limit: int = 50):
     """Get raw reports using Supabase client"""
@@ -681,3 +785,46 @@ if __name__ == "__main__":
         print(f"⚠️ Database initialization warning: {e}")
     
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
+
+@app.post("/api/admin/ingest-dummy-tweets")
+def ingest_dummy_tweets(count: int = 5, db: DBSession = Depends(get_db)):
+    """Insert dummy tweets into raw_reports and process them through the pipeline."""
+    try:
+        inserted = []
+        for i in range(count):
+            tweet_text = f"Dummy tweet #{i+1}: observed flooding and unusually high waves near the coast."
+            lat = 9.0 + (i * 0.005)
+            lon = 78.0 + (i * 0.005)
+            social_id = f"tweet_dummy_{uuid.uuid4()}"
+
+            # Insert via SQLAlchemy model
+            report = RawReport(
+                source='social',
+                text=tweet_text,
+                lat=lat,
+                lon=lon,
+                media_path=None,
+                has_media=False,
+                processed=False,
+                social_id=social_id,
+                user_name='twitter_dummy'
+            )
+
+            db.add(report)
+            db.flush()
+            inserted.append(report.id)
+
+        db.commit()
+
+        results = []
+        for rid in inserted:
+            ok = pipeline.process_single_report(rid, db)
+            results.append({'id': str(rid), 'processed': bool(ok)})
+
+        return {'inserted': len(inserted), 'results': results}
+
+    except Exception as e:
+        print(f"Error ingesting dummy tweets: {e}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
