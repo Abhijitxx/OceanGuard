@@ -1,0 +1,45 @@
+# Dependencies
+node_modules/
+backend/__pycache__/
+backend/services/__pycache__/
+
+# Environment variables
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Build outputs
+frontend/build/
+*.pyc
+*.pyo
+*.pyd
+__pycache__/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Database backups (keep main hazard.db)
+*.db.backup
+*.sqlite.backup
+
+# Media uploads (optional - you may want to track or ignore)
+backend/media/uploads/
+
+# Temporary files
+*.tmp
+*.temp
